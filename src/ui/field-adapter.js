@@ -1,0 +1,170 @@
+/*
+ * Avro Phonetic engine -- web port (UI chunk: field adapter)
+ * Wraps <input>, <textarea>, and contenteditable elements behind one
+ * interface so the controller never needs to know which kind of field
+ * it's typing into.
+ */
+
+var Avro = (typeof Avro !== 'undefined') ? Avro : {};
+Avro.UI = Avro.UI || {};
+
+Avro.UI.FieldAdapter = function (el) {
+    this.el = el;
+    this.isContentEditable = !(el.tagName === 'INPUT' || el.tagName === 'TEXTAREA');
+};
+
+Avro.UI.FieldAdapter.prototype = {
+
+    // ---- plain text field (input/textarea) ----
+
+    _nativeCaret: function () {
+        return this.el.selectionStart;
+    },
+
+    // Replace the range [start, end) of the field's text with `text`,
+    // and move the caret to start + text.length.
+    replaceRange: function (start, end, text) {
+        if (!this.isContentEditable) {
+            var val = this.el.value;
+            this.el.value = val.slice(0, start) + text + val.slice(end);
+            var pos = start + text.length;
+            this.el.setSelectionRange(pos, pos);
+        } else {
+            this._replaceRangeCE(start, end, text);
+        }
+    },
+
+    getCaretIndex: function () {
+        if (!this.isContentEditable) {
+            return this._nativeCaret();
+        }
+        return this._caretIndexCE();
+    },
+
+    getValue: function () {
+        if (!this.isContentEditable) {
+            return this.el.value;
+        }
+        return this.el.textContent;
+    },
+
+    // ---- contenteditable (best-effort: works for plain divs; editors that
+    // fully own their own DOM model, e.g. rich text frameworks, may not
+    // reflect these mutations back into their internal state) ----
+
+    _getTextNodeAndOffset: function (globalIndex) {
+        var walker = document.createTreeWalker(this.el, NodeFilter.SHOW_TEXT, null, false);
+        var node, count = 0;
+        while ((node = walker.nextNode())) {
+            var len = node.textContent.length;
+            if (globalIndex <= count + len) {
+                return { node: node, offset: globalIndex - count };
+            }
+            count += len;
+        }
+        return { node: this.el, offset: this.el.childNodes.length };
+    },
+
+    _caretIndexCE: function () {
+        var sel = window.getSelection();
+        if (!sel.rangeCount) return 0;
+        var range = sel.getRangeAt(0);
+        var pre = range.cloneRange();
+        pre.selectNodeContents(this.el);
+        pre.setEnd(range.endContainer, range.endOffset);
+        return pre.toString().length;
+    },
+
+    _replaceRangeCE: function (start, end, text) {
+        var sel = window.getSelection();
+        var range = document.createRange();
+        var startPos = this._getTextNodeAndOffset(start);
+        var endPos = this._getTextNodeAndOffset(end);
+        range.setStart(startPos.node, startPos.offset);
+        range.setEnd(endPos.node, endPos.offset);
+        range.deleteContents();
+        var textNode = document.createTextNode(text);
+        range.insertNode(textNode);
+
+        // Move caret to end of inserted text.
+        var newRange = document.createRange();
+        newRange.setStart(textNode, textNode.length);
+        newRange.collapse(true);
+        sel.removeAllRanges();
+        sel.addRange(newRange);
+
+        this.el.normalize();
+    },
+
+    // ---- pixel position of the caret, for placing the popup ----
+
+    getCaretRect: function () {
+        if (this.isContentEditable) {
+            return this._caretRectCE();
+        }
+        return this._caretRectPlain();
+    },
+
+    _caretRectCE: function () {
+        var sel = window.getSelection();
+        if (!sel.rangeCount) return this.el.getBoundingClientRect();
+        var range = sel.getRangeAt(0).cloneRange();
+        range.collapse(true);
+        if (typeof range.getClientRects === 'function') {
+            var rects = range.getClientRects();
+            if (rects.length) return rects[0];
+        }
+        return this.el.getBoundingClientRect();
+    },
+
+    // Mirror-div technique: clone the field's text-affecting CSS onto an
+    // offscreen div, split the text at the caret, and measure where a
+    // marker span at that split point lands.
+    _caretRectPlain: function () {
+        var el = this.el;
+        var mirror = document.createElement('div');
+        var style = window.getComputedStyle(el);
+
+        var props = [
+            'boxSizing', 'width', 'height', 'overflowX', 'overflowY',
+            'borderTopWidth', 'borderRightWidth', 'borderBottomWidth', 'borderLeftWidth',
+            'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft',
+            'fontStyle', 'fontVariant', 'fontWeight', 'fontStretch', 'fontSize',
+            'lineHeight', 'fontFamily', 'textAlign', 'textTransform',
+            'letterSpacing', 'wordSpacing', 'whiteSpace'
+        ];
+        props.forEach(function (p) { mirror.style[p] = style[p]; });
+
+        mirror.style.position = 'absolute';
+        mirror.style.visibility = 'hidden';
+        mirror.style.top = '0';
+        mirror.style.left = '-9999px';
+        mirror.style.whiteSpace = (el.tagName === 'TEXTAREA') ? 'pre-wrap' : 'pre';
+        mirror.style.wordWrap = 'break-word';
+
+        var caret = this.getCaretIndex();
+        var value = el.value;
+        var before = value.substring(0, caret);
+        var after = value.substring(caret) || '.';
+
+        mirror.textContent = before;
+        var marker = document.createElement('span');
+        marker.textContent = after.charAt(0);
+        mirror.appendChild(marker);
+        mirror.appendChild(document.createTextNode(after.substring(1)));
+
+        document.body.appendChild(mirror);
+        var elRect = el.getBoundingClientRect();
+        var markerRect = marker.getBoundingClientRect();
+        var mirrorRect = mirror.getBoundingClientRect();
+
+        var rect = {
+            left: elRect.left + (markerRect.left - mirrorRect.left) - el.scrollLeft,
+            top: elRect.top + (markerRect.top - mirrorRect.top) - el.scrollTop,
+            height: markerRect.height || parseInt(style.lineHeight, 10) || 16
+        };
+
+        document.body.removeChild(mirror);
+        return rect;
+    }
+};

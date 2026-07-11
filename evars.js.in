@@ -1,7 +1,0 @@
-function get_pkgdatadir(){
-return \"${pkgdatadir}\";
-}
-function get_libexecdir(){
-return \"${libexecdir}\";
-}
-

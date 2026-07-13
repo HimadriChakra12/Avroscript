@@ -20,9 +20,9 @@
 var OUT_FILE = "dist/avro.user.js";
 
 var META = {
-    name: "Avro Phonetic (web)",
-    namespace: "https://github.com/HimadriChakra12/Prakrit",
-    version: "2.2.0",
+    name: "Avro Phonetic Script",
+    namespace: "https://github.com/HimadriChakra12/Avroscript",
+    version: "2.2.1",
     description: "Bengali phonetic transliteration IME for the web, ported from ibus-avro. Ctrl+Space to toggle.",
     author: "HimadriChakra12",
     match: ["*://*/*"],

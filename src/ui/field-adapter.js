@@ -269,6 +269,18 @@ Avro.UI.FieldAdapter.prototype = {
     // app initializes long before this script runs -- a chance to run
     // first and update its model to match.
     //
+    // Under fast typing specifically, a *stray* selectionchange can fire
+    // for a reason that has nothing to do with the selection we just set
+    // here -- e.g. Slate is still asynchronously settling its own
+    // re-render from the *previous* write when this one starts. Trusting
+    // the first selectionchange we see, whatever caused it, occasionally
+    // meant dispatching before Slate had actually caught up to *this*
+    // selection. So this doesn't just wait for a signal -- it re-checks
+    // that the live selection still matches what we intended every time
+    // one arrives, and if something else has since moved it, reasserts
+    // our range and keeps waiting (bounded, so a truly wedged state still
+    // eventually dispatches rather than hanging).
+    //
     // Returns a Promise<boolean>: true only if something actually
     // intercepted the dispatched event (called preventDefault()) -- that's
     // the signal a framework picked it up and applied it; if nothing did,
@@ -277,25 +289,54 @@ Avro.UI.FieldAdapter.prototype = {
     // to fall back to another method.
     _insertViaInputEvent: function (text) {
         var self = this;
+        var sel = window.getSelection();
+        if (!sel.rangeCount) return Promise.resolve(false);
+        var intended = sel.getRangeAt(0).cloneRange();
+
+        function matchesIntent() {
+            if (!sel.rangeCount) return false;
+            var cur = sel.getRangeAt(0);
+            return cur.startContainer === intended.startContainer &&
+                cur.startOffset === intended.startOffset &&
+                cur.endContainer === intended.endContainer &&
+                cur.endOffset === intended.endOffset;
+        }
+
         return new Promise(function (resolve) {
             if (typeof InputEvent !== 'function') { resolve(false); return; }
 
-            var fired = false;
-            var onSelectionChange = function () {
-                if (fired) return;
-                fired = true;
+            var settled = false;
+            var attempts = 0;
+            var MAX_ATTEMPTS = 6;
+
+            var onSelectionChange = function () { check(); };
+
+            function check() {
+                if (settled) return;
+                attempts++;
+                if (matchesIntent() || attempts > MAX_ATTEMPTS) {
+                    finish();
+                    return;
+                }
+                // Something else moved the selection out from under us --
+                // most likely a previous write's reconciliation still
+                // catching up. Reassert our intended range and keep
+                // waiting; the retry timeout below is the safety net in
+                // case selectionchange doesn't fire again on its own.
+                sel.removeAllRanges();
+                sel.addRange(intended.cloneRange());
+                setTimeout(check, 0);
+            }
+
+            function finish() {
+                if (settled) return;
+                settled = true;
                 document.removeEventListener('selectionchange', onSelectionChange, true);
                 dispatch();
-            };
+            }
+
             document.addEventListener('selectionchange', onSelectionChange, true);
-            // Safety net: don't hang forever if selectionchange never fires
-            // (e.g. the selection didn't actually change position).
-            setTimeout(function () {
-                if (fired) return;
-                fired = true;
-                document.removeEventListener('selectionchange', onSelectionChange, true);
-                dispatch();
-            }, 0);
+            setTimeout(check, 0);
 
             function dispatch() {
                 try {

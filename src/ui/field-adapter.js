@@ -45,7 +45,24 @@ Avro.UI.FieldAdapter.prototype = {
         if (!this.isContentEditable) {
             return this.el.value;
         }
-        return this.el.textContent;
+        return this._stripInvisible(this.el.textContent);
+    },
+
+    // Framework-managed editors (Slate.js -- Discord's message box, Slack,
+    // etc.) commonly insert zero-width placeholder characters into the DOM
+    // purely for cursor-stability around empty/void positions, and add or
+    // remove them opportunistically the moment real content appears there
+    // -- most commonly the very first character typed into an empty
+    // message box, or right after backspacing it back to empty. They carry
+    // no actual text meaning, but left in, they silently shift every
+    // absolute character index this file computes by one exactly at that
+    // moment, desyncing _verifyComposition and making composition
+    // intermittently glitch. Stripped here so getValue()/getCaretIndex()/
+    // _getTextNodeAndOffset() all agree on the same "real text only" count
+    // regardless of whether the host editor's placeholder happens to be
+    // present right now.
+    _stripInvisible: function (s) {
+        return s.replace(/[\uFEFF\u200B]/g, '');
     },
 
     // True when there's a real, non-collapsed selection (e.g. from Ctrl+A or
@@ -124,6 +141,10 @@ Avro.UI.FieldAdapter.prototype = {
         sel.removeAllRanges();
         sel.addRange(deleteRange);
 
+        if (this._insertViaInputEvent('')) {
+            return true;
+        }
+
         if (this._insertViaExecCommand('')) {
             return true;
         }
@@ -145,11 +166,22 @@ Avro.UI.FieldAdapter.prototype = {
         var walker = document.createTreeWalker(this.el, NodeFilter.SHOW_TEXT, null, false);
         var node, count = 0;
         while ((node = walker.nextNode())) {
-            var len = node.textContent.length;
-            if (globalIndex <= count + len) {
-                return { node: node, offset: globalIndex - count };
+            var raw = node.textContent;
+            var logicalLen = this._stripInvisible(raw).length;
+            if (globalIndex <= count + logicalLen) {
+                // Translate the (invisible-stripped) logical offset within
+                // this node back to a raw offset, skipping over any
+                // invisible characters interspersed before it so the
+                // Range we hand back always lands on real content.
+                var need = globalIndex - count;
+                var rawOffset = 0, seen = 0;
+                while (rawOffset < raw.length && seen < need) {
+                    if (raw.charAt(rawOffset) !== '\uFEFF' && raw.charAt(rawOffset) !== '\u200B') seen++;
+                    rawOffset++;
+                }
+                return { node: node, offset: rawOffset };
             }
-            count += len;
+            count += logicalLen;
         }
         return { node: this.el, offset: this.el.childNodes.length };
     },
@@ -161,7 +193,7 @@ Avro.UI.FieldAdapter.prototype = {
         var pre = range.cloneRange();
         pre.selectNodeContents(this.el);
         pre.setEnd(range.endContainer, range.endOffset);
-        return pre.toString().length;
+        return this._stripInvisible(pre.toString()).length;
     },
 
     _replaceRangeCE: function (start, end, text) {
@@ -174,18 +206,33 @@ Avro.UI.FieldAdapter.prototype = {
         sel.removeAllRanges();
         sel.addRange(range);
 
-        // Framework-managed editors (Discord/Slack-style Slate.js or React/Draft.js
-        // composers) re-render from their own internal state, so directly mutating
-        // the DOM gets silently overwritten -- the change never appears. Routing
-        // through execCommand goes through the browser's native text-editing
-        // pipeline instead, which fires the real input/beforeinput events these
-        // frameworks are actually listening to.
+        // Framework-managed editors (Discord/Slack-style Slate.js, or React/
+        // Draft.js/Lexical composers) maintain their OWN internal document
+        // model and re-render the DOM from it -- they don't just read
+        // whatever's sitting in the DOM. document.execCommand DOES perform a
+        // real DOM edit, but Slate never finds out about it: confirmed
+        // directly against Discord, where execCommand-inserted text got
+        // silently reverted (or desynced from the caret) the moment
+        // anything else re-rendered the box, and repeated inserts landed on
+        // top of each other instead of appending. Dispatching a real
+        // `beforeinput` event is what actually gets Slate's attention --
+        // it's the specific event these frameworks are built to intercept
+        // and apply through their own model, which is the only way an edit
+        // here reliably sticks. Also confirmed directly: successive inserts
+        // correctly append, the placeholder clears, and Enter sends.
+        if (this._insertViaInputEvent(text)) {
+            return;
+        }
+
+        // Not intercepted by a framework -- try the browser's native
+        // editing command, which performs a real DOM edit regardless of
+        // whether anything is listening.
         if (this._insertViaExecCommand(text)) {
             return;
         }
 
-        // Fallback for plain contenteditable divs (no framework watching them),
-        // or browsers where execCommand is unavailable/deprecated away.
+        // Last resort: raw DOM manipulation for plain contenteditable divs,
+        // or browsers where neither of the above is available.
         range.deleteContents();
         var textNode = document.createTextNode(text);
         range.insertNode(textNode);
@@ -197,6 +244,33 @@ Avro.UI.FieldAdapter.prototype = {
         sel.addRange(newRange);
 
         this.el.normalize();
+    },
+
+    // Dispatches a real `beforeinput` event with the current selection
+    // already positioned, so a listening framework applies the edit
+    // through its own model exactly as if the browser itself had produced
+    // this event from real user input. Returns true only if something
+    // actually intercepted it (called preventDefault()) -- that's the
+    // signal a framework picked it up and applied it; if nothing did, this
+    // call had no effect at all (synthetic events don't trigger the
+    // browser's native edit the way a real one would), so the caller needs
+    // to fall back to another method.
+    _insertViaInputEvent: function (text) {
+        try {
+            if (typeof InputEvent !== 'function') return false;
+            var isDelete = (text === '');
+            var evt = new InputEvent('beforeinput', {
+                inputType: isDelete ? 'deleteContentBackward' : 'insertText',
+                data: isDelete ? null : text,
+                bubbles: true,
+                cancelable: true,
+                composed: true
+            });
+            this.el.dispatchEvent(evt);
+            return evt.defaultPrevented;
+        } catch (e) {
+            return false;
+        }
     },
 
     _insertViaExecCommand: function (text) {

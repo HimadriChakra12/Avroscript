@@ -19,14 +19,34 @@ Avro.UI.Controller.prototype = {
         this._lastPreview = null;  
         this._suggestion = null;   
         this._reparseScheduled = false; 
+        this._epoch = 0;
+    },
+
+    // Bumps whenever a composition is invalidated out from under us --
+    // i.e. something other than our own commit/cancel/clear changed the
+    // field's text for this word (Ctrl+Backspace, Ctrl+Z, Ctrl+A + typing
+    // over a selection, etc: any Ctrl/Meta combo we don't control the
+    // resulting edit for). A reparse can already be sitting in the queue
+    // for the word that just got invalidated; without this, it runs
+    // later against a field that no longer matches what it expects,
+    // legitimately fails verification, and "abandons" -- which eats
+    // whichever keystroke triggered that reparse. Capturing the epoch at
+    // schedule time and checking it when the callback actually runs turns
+    // that stale reparse into a no-op instead.
+    _invalidateComposition: function () {
+        this._lastPreview = null;
+        this._suggestion = null;
+        this._epoch++;
     },
 
     _scheduleReparse: function () {
         if (this._reparseScheduled) return;
         this._reparseScheduled = true;
+        var epoch = this._epoch;
         var self = this;
         this._enqueue(function () {
             self._reparseScheduled = false;
+            if (epoch !== self._epoch) return;
             self._reparse();
         });
     },
@@ -71,6 +91,7 @@ Avro.UI.Controller.prototype = {
         if (e.ctrlKey || e.metaKey) {
             if (this._active) {
                 this._active = false;
+                this._invalidateComposition();
                 this._enqueue(function () { self.window.hide(); });
             }
             return false;
@@ -109,6 +130,7 @@ Avro.UI.Controller.prototype = {
             if (this.field.hasSelectionRange()) {
                 if (this._active) {
                     this._active = false;
+                    this._invalidateComposition();
                     this._enqueue(function () { self.window.hide(); });
                 }
                 return false;
@@ -190,8 +212,7 @@ Avro.UI.Controller.prototype = {
         var range = this._verifyComposition();
         if (hadPreviousWrite && !range) {
             this._active = false;
-            this._lastPreview = null;
-            this._suggestion = null;
+            this._invalidateComposition();
             this.window.hide();
             return;
         }

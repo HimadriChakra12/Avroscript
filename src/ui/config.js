@@ -65,7 +65,9 @@ Avro.Config = {
     //       'vai': 'ভাই',
     //   }
     // Set customDict to {} or null to disable.
-    customDict: {},
+    customDict: {
+        '.' : '।'
+    },
 
     // 'top'         – custom entries prepended before built-in dict results.
     // 'bottom'      – custom entries appended after built-in dict results.
